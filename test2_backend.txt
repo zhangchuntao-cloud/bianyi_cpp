@@ -1,0 +1,9 @@
+program backend_optimization_demo;
+var a,b,c,d:integer;
+begin
+    a:=2;
+    b:=3;
+    c:=(a+b)+(a+b);
+    d:=c*1+0;
+    write(d)
+end.

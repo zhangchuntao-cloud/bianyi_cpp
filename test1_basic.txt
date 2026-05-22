@@ -1,0 +1,23 @@
+program compiler_test
+var a,b,c:integer;
+    x,y:real;
+begin
+    a:=10;
+    b:=3;
+    c:=a-b*2;
+    x:=3.14;
+    y:=x+a;
+    
+    if a > b then
+        write(a);
+    else
+        write(b);
+    
+    while c < 10 do
+    begin
+        c:=c+1;
+        write(c)
+    end;
+    
+    write(c+y)
+end.
