@@ -18,31 +18,36 @@
  * 注意：这里输出的是教学用目标代码，不是完整汇编器。
  */
 struct BasicBlockInfo {
-    int id = 0;
-    int start = 0;
+    int id = 0;   // 块编号
+    int start = 0;// 起始四元式下标
     int end = 0;
-    vector<int> succ;
-    string reason;
+    vector<int> succ;  // 后继块（跳转去哪里）
+    string reason;// 为什么这里是块入口
 };
 
+// 单条四元式 活跃变量数据流信息
 struct LiveInfo {
-    set<string> use, def, in, out;
+    set<string> use;   // 使用集
+    set<string> def;   // 定义集
+    set<string> in;    // 入口活跃集
+    set<string> out;   // 出口活跃集
 };
 
 /* Backend：后端处理类，输入四元式，输出优化结果和目标代码。 */
 class Backend {
     const Compiler &c;
-    vector<Quad> original;
-    vector<Quad> afterLocalOpt;
-    vector<Quad> afterLoopOpt;
-    vector<Quad> optimized;
+    vector<Quad> original;//原始4元式
+    vector<Quad> afterLocalOpt;//局部优化的
+    vector<Quad> afterLoopOpt;//局部优化基础上, 循环优化后的4元式
+    vector<Quad> optimized;//最终
     vector<BasicBlockInfo> originalBlocks;
     vector<BasicBlockInfo> optimizedBlocks;
-    vector<LiveInfo> live;
-    vector<string> optimizationLog;
-    vector<string> loopLog;
-    map<string, int> targetOffset;
-    map<string, string> stringLiteralLabel;
+    vector<LiveInfo> live; //活跃变量数据流信息
+    vector<string> optimizationLog;   //局部优化log
+    vector<string> loopLog;            //循环优化log
+//目标代码生成专用映射表
+    map<string, int> targetOffset;       //- 变量 → 内存偏移地址映射。
+    map<string, string> stringLiteralLabel;    //- 字符串常量 → 汇编标号映射。- 例如 "hello" → STR0、STR1。
 
     /*
      * 判断字符串是不是数字常量。
