@@ -87,13 +87,24 @@ class Backend {
     static bool isTempName(const string &s) {
         return s.size() >= 2 && s[0] == 't' && all_of(s.begin() + 1, s.end(), ::isdigit);
     }
+//isbinary判断传入的四元式操作符是否为「二元运算符」。
+二元运算符 = 需要两个操作数参与运算的运算符。
     static bool isBinaryOp(const string &op) {
         static set<string> ops = {"+", "-", "*", "/", "<", ">", "<=", ">=", "=", "<>", "&&", "||"};
         return ops.count(op) > 0;
     }
+//一元运算符判断:
     static bool isUnaryOp(const string &op) { return op == "neg" || op == "!"; }
+    //纯计算语句,
+用于删除无用赋值优化：只有纯计算语句，且临时变量后续不活跃，才允许删除。
     static bool isPureCompute(const Quad &q) { return isBinaryOp(q.op) || isUnaryOp(q.op) || q.op == ":="; }
+    /*包含语句
+- goto：无条件跳转
+- ifFalse：条件分支跳转
+- return：函数返回
+- end / endmain：程序结束*/
     static bool isControl(const Quad &q) { return q.op == "goto" || q.op == "ifFalse" || q.op == "return" || q.op == "end" || q.op == "endmain"; }
+    //可交换运算符判断, 交换律
     static bool isCommutative(const string &op) { return op == "+" || op == "*" || op == "=" || op == "<>" || op == "&&" || op == "||"; }
 
     static string boolToNum(const string &s) {
@@ -106,30 +117,42 @@ class Backend {
      * 对二元运算做常量计算。
      * 如果两个操作数都是常数，就直接算出结果，完成常值表达式节省。
      */
+    //运算符op、两个操作数a/b、输出参数res（存储运算结果）
     static bool evalBinary(const string &op, const string &a, const string &b, string &res) {
         string aa = boolToNum(a), bb = boolToNum(b);
+        // 校验转换后的值是否为合法数字字面量
         if (!isNumberLiteral(aa) || !isNumberLiteral(bb)) return false;
+        // 字符串转双精度浮点数
         double x = stod(aa), y = stod(bb), r = 0;
+
+        //
         if (op == "+") r = x + y;
         else if (op == "-") r = x - y;
         else if (op == "*") r = x * y;
+        // 除零保护：判断除数绝对值是否接近0（浮点精度判断）
         else if (op == "/") { if (fabs(y) < 1e-12) return false; r = x / y; }
+        
         else if (op == "<") r = x < y;
         else if (op == ">") r = x > y;
         else if (op == "<=") r = x <= y;
         else if (op == ">=") r = x >= y;
-        else if (op == "=") r = fabs(x - y) < 1e-12;
+        
+        else if (op == "=") r = fabs(x - y) < 1e-12;//浮点相等判断
         else if (op == "<>") r = fabs(x - y) >= 1e-12;
+        // 逻辑运算：非0视为true，0视为false
         else if (op == "&&") r = (fabs(x) >= 1e-12) && (fabs(y) >= 1e-12);
         else if (op == "||") r = (fabs(x) >= 1e-12) || (fabs(y) >= 1e-12);
-        else return false;
-        res = trimNumber(r);
+        else return false;//不支持的
+        
+        res = trimNumber(r);// 格式化数字结果（去除末尾0、小数点等）
         return true;
     }
 
     static bool evalUnary(const string &op, const string &a, string &res) {
+        //输入普通数字（"5"、"-3.14"、"0"）→ 原样不变
         string aa = boolToNum(a);
-        if (!isNumberLiteral(aa)) return false;
+        if (!isNumberLiteral(aa)) return false;//合法
+        //转浮点数
         double x = stod(aa), r = 0;
         if (op == "neg") r = -x;
         else if (op == "!") r = !(fabs(x) >= 1e-12);
@@ -170,12 +193,12 @@ class Backend {
         }
         return false;
     }
-
+    //给二元表达式生成一个唯一的「缓存 key」，让 a+b 和 b+a 生成同一个 key
     static string exprKey(string op, string a, string b) {
         if (isCommutative(op) && b < a) swap(a, b);
         return op + "|" + a + "|" + b;
     }
-
+    //解析缓存键key → [op, a, b]
     static vector<string> splitExprKey(const string &key) {
         vector<string> out;
         string cur;
@@ -192,20 +215,47 @@ class Backend {
      * 例如 (+,a,b,t1) 的 USE 是 {a,b}。
      */
     static set<string> usesOf(const Quad &q) {
-        set<string> u;
+        set<string> u;  // 存放：这条四元式用到的所有变量（自动去重）
+
+        // 工具：如果 x 是变量名，就加入集合
         auto add = [&](const string &x) { if (isVariableName(x)) u.insert(x); };
-        if (isBinaryOp(q.op)) { add(q.arg1); add(q.arg2); }
-        else if (isUnaryOp(q.op)) add(q.arg1);
-        else if (q.op == ":=") add(q.arg1);
-        else if (q.op == "ifFalse") add(q.arg1);
-        else if (q.op == "write") add(q.arg1);
-        else if (q.op == "param") add(q.arg1);
-        else if (q.op == "return") add(q.arg1);
-        else if (q.op == "[]=") { add(q.arg1); add(q.arg2); add(q.result); }
-        else if (q.op == "=[]") { add(q.arg1); add(q.arg2); }
-        else if (q.op == ".=" || q.op == "->=") { add(q.arg1); add(q.result); }
-        else if (q.op == "." || q.op == "->") add(q.arg1);
-        return u;
+
+        // 👇 根据不同指令，收集用到的变量
+        if (isBinaryOp(q.op)) {          // 二元运算：+ - * / && || == < > ...
+            add(q.arg1); add(q.arg2);   // 用到 arg1, arg2
+        }
+        else if (isUnaryOp(q.op)) {     // 一元运算：neg !
+            add(q.arg1);                // 用到 arg1
+        }
+        else if (q.op == ":=") {        // 赋值：a := b
+            add(q.arg1);                // 用到 b
+        }
+        else if (q.op == "ifFalse") {   // 条件跳转：ifFalse cond
+            add(q.arg1);                // 用到 cond
+        }
+        else if (q.op == "write") {     // 输出：write x
+            add(q.arg1);                // 用到 x
+        }
+        else if (q.op == "param") {     // 函数参数：param x
+            add(q.arg1);                // 用到 x
+        }
+        else if (q.op == "return") {    // 返回：return x
+            add(q.arg1);                // 用到 x
+        }
+        else if (q.op == "[]=") {       // 数组赋值：a[i] = x
+            add(q.arg1); add(q.arg2); add(q.result); // 用到 a, i, x
+        }
+        else if (q.op == "=[]") {       // 数组取值：x = a[i]
+            add(q.arg1); add(q.arg2);   // 用到 a, i
+        }
+        else if (q.op == ".=" || q.op == "->=") { // 成员赋值：a.b = x
+            add(q.arg1); add(q.result); // 用到 a, x
+        }
+        else if (q.op == "." || q.op == "->") {   // 成员访问：x = a.b
+            add(q.arg1);                // 用到 a
+        }
+
+        return u; // 返回所有用到的变量
     }
 
     /*
@@ -219,7 +269,7 @@ class Backend {
         else if (q.op == "call" && q.result != "_") add(q.result);
         return d;
     }
-
+    //转字符串
     static string setToString(const set<string> &s) {
         if (s.empty()) return "{}";
         vector<string> xs(s.begin(), s.end());
