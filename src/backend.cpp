@@ -284,6 +284,8 @@ class Backend {
      * 扫描四元式，记录 label/function/main 所在的位置。
      * 基本块划分和跳转目标查找都要用。
      */
+    //遍历所有四元式指令，记录「标签名 / 函数名 → 指令行号」的映射表。
+    //以后跳转、调用函数时，直接查表知道跳去第几行
     map<string, int> labelIndex(const vector<Quad> &qs) const {
         map<string, int> mp;
         for (int i = 0; i < (int)qs.size(); ++i) {
@@ -300,43 +302,54 @@ class Backend {
      * 每个 leader 到下一个 leader 前一条就是一个基本块。
      */
     vector<BasicBlockInfo> buildBlocks(const vector<Quad> &qs) const {
-        vector<BasicBlockInfo> blocks;
+        vector<BasicBlockInfo> blocks;//基本块列表
         if (qs.empty()) return blocks;
+        //1. 先建立标签/函数 → 指令行号的映射表
         map<string, int> lbl = labelIndex(qs);
         map<int, string> leaderReason;
+        // 工具lambda：标记 idx 行为基本块入口，并记录原因
         auto mark = [&](int idx, const string &why) {
             if (idx >= 0 && idx < (int)qs.size()) {
                 if (leaderReason[idx].empty()) leaderReason[idx] = why;
                 else leaderReason[idx] += ";" + why;
             }
         };
-        mark(0, "第一条四元式");
+        // 2. 标记所有基本块入口（leader）
+        mark(0, "第一条四元式");// 程序第一行一定是入口
+        
+        // 遍历每一条四元式，寻找所有入口点
         for (int i = 0; i < (int)qs.size(); ++i) {
             const Quad &q = qs[i];
             if (q.op == "label" || q.op == "function" || q.op == "main") mark(i, q.op + "入口");
             if (q.op == "goto" || q.op == "ifFalse" || q.op == "return" || q.op == "end" || q.op == "endmain") mark(i + 1, "跳转/出口的后继");
             if ((q.op == "goto" || q.op == "ifFalse") && lbl.count(q.result)) mark(lbl[q.result], "跳转目标" + q.result);
         }
+        // 3. 收集所有入口行号，并排序、去重
         vector<int> leaders;
         for (auto &p : leaderReason) leaders.push_back(p.first);
         sort(leaders.begin(), leaders.end());
         leaders.erase(unique(leaders.begin(), leaders.end()), leaders.end());
-        map<int, int> blockOfStart;
+        // 4. 根据入口划分基本块
+        map<int, int> blockOfStart;    //块起始行 → 块ID
         for (size_t i = 0; i < leaders.size(); ++i) {
             BasicBlockInfo b;
-            b.id = (int)i;
-            b.start = leaders[i];
+            b.id = (int)i;//块id
+            b.start = leaders[i];//块起始指令行
+            //
             b.end = (i + 1 < leaders.size() ? leaders[i + 1] - 1 : (int)qs.size() - 1);
             b.reason = leaderReason[b.start];
             blockOfStart[b.start] = b.id;
             blocks.push_back(b);
         }
+        /// 5. 建立映射：指令行号 → 所属基本块ID
         map<int, int> instToBlock;
         for (auto &b : blocks) for (int i = b.start; i <= b.end; ++i) instToBlock[i] = b.id;
+        // 6. 建立映射：标签名 → 所在基本块ID
         map<string, int> labelBlock;
         for (auto &p : lbl) if (instToBlock.count(p.second)) labelBlock[p.first] = instToBlock[p.second];
+        // 7. 计算每个基本块的【后继块】succ（控制流）
         for (auto &b : blocks) {
-            const Quad &last = qs[b.end];
+            const Quad &last = qs[b.end];//
             set<int> ss;
             if (last.op == "goto") {
                 if (labelBlock.count(last.result)) ss.insert(labelBlock[last.result]);
@@ -346,8 +359,10 @@ class Backend {
             } else if (last.op == "return" || last.op == "end" || last.op == "endmain") {
                 // 出口基本块没有后继。
             } else {
+                //普通顺序执行 ->后继是下一个块
                 if (b.id + 1 < (int)blocks.size()) ss.insert(b.id + 1);
             }
+            //后继存入succ
             b.succ.assign(ss.begin(), ss.end());
         }
         return blocks;
@@ -359,16 +374,23 @@ class Backend {
      */
     vector<Quad> localOptimize(const vector<Quad> &qs) {
         vector<Quad> out = qs;
+        // 1. 构建基本块，只在块内优化（局部优化）
         auto blocks = buildBlocks(out);
+        //
         for (auto &b : blocks) {
+            //
             map<string, string> constEnv;       // var -> constant
-            map<string, string> exprResult;     // expression key -> previous result
+            map<string, string> exprResult;     // expression key -> 计算结果
+            // 工具lambda：如果变量是已知常量，就替换成常量值
             auto replaceByConst = [&](string x) {
                 if (constEnv.count(x)) return constEnv[x];
                 return x;
             };
+            // 工具lambda：当变量d被重新赋值时，杀死相关常量与表达式
             auto kill = [&](const string &d) {
+                // 1. 常量环境中删除d（因为被重新赋值，不再是常量）
                 constEnv.erase(d);
+                 // 2. 删除所有用到d的表达式缓存（表达式失效）
                 for (auto it = exprResult.begin(); it != exprResult.end();) {
                     vector<string> parts = splitExprKey(it->first);
                     bool hit = false;
@@ -379,32 +401,43 @@ class Backend {
                     else ++it;
                 }
             };
-
+            //遍历当前基本块内的每一条四元式
             for (int i = b.start; i <= b.end; ++i) {
                 Quad q = out[i];
+                //
                 if (q.op == "nop") continue;
+                // ===================== 常量传播：把变量替换成已知常量 =====================
                 if (isBinaryOp(q.op)) { q.arg1 = replaceByConst(q.arg1); q.arg2 = replaceByConst(q.arg2); }
                 else if (isUnaryOp(q.op) || q.op == ":=" || q.op == "ifFalse" || q.op == "write" || q.op == "param" || q.op == "return") q.arg1 = replaceByConst(q.arg1);
                 else if (q.op == "[]=") { q.arg1 = replaceByConst(q.arg1); q.arg2 = replaceByConst(q.arg2); }
                 else if (q.op == "=[]") { q.arg2 = replaceByConst(q.arg2); }
                 else if (q.op == ".=" || q.op == "->=") q.arg1 = replaceByConst(q.arg1);
-
+                // ===================== 常量折叠 / 代数化简 =====================
                 string folded;
+                //二元
                 if (isBinaryOp(q.op) && evalBinary(q.op, q.arg1, q.arg2, folded)) {
                     optimizationLog.push_back("常值表达式节省：" + quadToString(out[i]) + "  ==>  (:=," + folded + ",_," + q.result + ")");
                     q = {":=", folded, "_", q.result};
-                } else if (isUnaryOp(q.op) && evalUnary(q.op, q.arg1, folded)) {
+                } //一元
+                else if (isUnaryOp(q.op) && evalUnary(q.op, q.arg1, folded)) {
                     optimizationLog.push_back("常值表达式节省：" + quadToString(out[i]) + "  ==>  (:=," + folded + ",_," + q.result + ")");
                     q = {":=", folded, "_", q.result};
-                } else if (isBinaryOp(q.op) && algebraicSimplify(q.op, q.arg1, q.arg2, folded)) {
+                } //代数化简
+                else if (isBinaryOp(q.op) && algebraicSimplify(q.op, q.arg1, q.arg2, folded)) {
                     optimizationLog.push_back("常值/代数表达式节省：" + quadToString(q) + "  ==>  (:=," + folded + ",_," + q.result + ")");
                     q = {":=", folded, "_", q.result};
-                } else if (isBinaryOp(q.op) || isUnaryOp(q.op)) {
+                }// ===================== 公共子表达式消除（核心优化） =====================
+                // 仅对 二元运算 / 一元运算 做重复表达式检测
+                else if (isBinaryOp(q.op) || isUnaryOp(q.op)) {
+                    // 生成表达式唯一键（满足交换律的运算会自动排序，保证a+b和b+a键相同）
                     string key = exprKey(q.op, q.arg1, q.arg2);
+                    // 如果该表达式已经计算过，并且结果变量不同，则直接复用之前的结果
                     if (exprResult.count(key) && q.result != exprResult[key]) {
                         optimizationLog.push_back("公共子表达式节省：" + quadToString(q) + "  复用 " + exprResult[key]);
+                        // 把计算指令 替换成 直接赋值（复用已有结果）
                         q = {":=", exprResult[key], "_", q.result};
                     } else {
+                        // 第一次计算，将表达式与结果存入缓存，供后续复用
                         exprResult[key] = q.result;
                     }
                 }
